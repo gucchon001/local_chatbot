@@ -13,3 +13,4 @@ logs/
 
 # Others
 *.req_hash
+*.json
