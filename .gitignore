@@ -1,0 +1,15 @@
+# Virtual environment
+myenv/
+
+# Logs
+logs/
+*.log
+
+# Hash files
+*.hash
+
+# Configuration files
+*.ini
+
+# Others
+*.req_hash
