@@ -10,7 +10,7 @@ from datetime import datetime
 import logging
 from langchain.schema import Document
 from langchain_openai import OpenAIEmbeddings
-from vector_store import create_faiss_index, save_to_parquet, save_faiss_index, load_faiss_index
+from vector_store import create_faiss_index, save_to_parquet, save_faiss_index, load_faiss_index, load_from_parquet
 from file_cache import check_file_changes, save_file_hashes
 from role_generator import generate_role_from_db
 
@@ -60,7 +60,7 @@ def create_documents(pages):
                 "title": title,
                 "description": description,
                 "page": str(i + 1),
-                "last_modified": last_modified
+                "last_modified": last_modified.isoformat() if last_modified else None
             }
         )
         documents.append(doc)
@@ -127,26 +127,32 @@ def analyze_website_structure(base_url, max_depth):
 
     return structure, total_pages, url_list  # url_listも返す
 
-def crawl_website(url_list, last_crawl_time=None):
+def crawl_website(url_list, parquet_file, last_crawl_time=None):
     pages = []
     crawled_pages = 0
-
-    logger.info(f"クローリングを開始: {len(url_list)} ページ")
+    
+    # 既存のparquetファイルから最終更新日時を読み込む
+    if os.path.exists(parquet_file):
+        existing_df = load_from_parquet(parquet_file)
+        existing_last_modified = dict(zip(existing_df['source'], existing_df['last_modified']))
+    else:
+        existing_last_modified = {}
 
     for url, depth in url_list:
         logger.debug(f"現在のURL: {url}, 深さ: {depth}, クロール済みページ数: {crawled_pages}")
 
-        crawled_pages += 1
-
-        logger.info(f"クロール中: {url} (深さ: {depth})")
+        current_last_modified = get_last_modified_date(url)
+        if current_last_modified and url in existing_last_modified:
+            if current_last_modified <= existing_last_modified[url]:
+                logger.info(f"ページに変更がないためスキップします: {url}")
+                continue
 
         try:
             response = requests.get(url, timeout=10)
             soup = BeautifulSoup(response.text, 'html.parser')
             pages.append((url, soup))
-
+            crawled_pages += 1
             logger.info(f"ページを取得しました: {url}, 深さ: {depth}")
-
         except Exception as e:
             logger.error(f"ページのクロール中にエラーが発生しました: {url}, エラー: {str(e)}")
 
@@ -194,7 +200,7 @@ def scrape_website(url, config, last_crawl_time=None):
 
     logger.info("ウェブサイトをクロールしてデータベースを作成します。")
     try:
-        pages, crawled_pages = crawl_website(url_list, last_crawl_time)
+        pages, crawled_pages = crawl_website(url_list, parquet_file, last_crawl_time)
         logger.info(f"クローリング完了。取得したページ数: {crawled_pages}")
     except Exception as e:
         logger.error(f"クローリング中にエラーが発生しました: {str(e)}")
@@ -233,7 +239,8 @@ def scrape_website(url, config, last_crawl_time=None):
         'content': [doc.page_content for doc in documents],
         'source': [doc.metadata['source'] for doc in documents],
         'title': [doc.metadata.get('title', '') for doc in documents],
-        'description': [doc.metadata.get('description', '') for doc in documents]
+        'description': [doc.metadata.get('description', '') for doc in documents],
+        'last_modified': [doc.metadata.get('last_modified') for doc in documents]
     })
 
     logger.info(f"Parquet ファイルを保存します: {parquet_file}")

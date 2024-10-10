@@ -5,8 +5,8 @@ from chat_processing import process_user_input
 from ui_components import set_page_config, display_custom_css, display_sidebar_info, display_chat_interface, display_main_title
 import logging
 from database import DatabaseManager
-from data_sources import FileDataSource, WebDataSource
-from database import DatabaseManager
+from data_sources import FileDataSource, WebDataSource, NotionDataSource
+from memory_management import ConversationManager
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -22,6 +22,8 @@ def clear_cache():
         st.session_state.db_manager.clear_cache()
     if 'data_source' in st.session_state:
         st.session_state.data_source.clear_cache()
+    if 'conversation_manager' in st.session_state:
+        st.session_state.conversation_manager.clear()
     logger.info("セッション状態とキャッシュをクリアしました")
 
 def handle_data_source_change(selected_source_name, selected_source_config):
@@ -36,13 +38,15 @@ def handle_data_source_change(selected_source_name, selected_source_config):
         elif selected_source_config['参照形式'] == 'Webサイト':
             logger.info(f"WebDataSource を作成します: {selected_source_config}")
             st.session_state.data_source = WebDataSource(selected_source_config)
+        elif selected_source_config['参照形式'] == 'Notion':
+            logger.info(f"NotionDataSource を作成します: {selected_source_config}")
+            st.session_state.data_source = NotionDataSource(selected_source_config)
         else:
             logger.error(f"Unsupported data source type: {selected_source_config['参照形式']}")
             raise ValueError(f"Unsupported data source type: {selected_source_config['参照形式']}")
         logger.info(f"Created data source: {type(st.session_state.data_source)}")
         return True
     return False
-
 
 def main():
     logger.info("アプリケーションを開始しました")
@@ -61,11 +65,14 @@ def main():
     
     db_manager = st.session_state.db_manager
 
+    if 'conversation_manager' not in st.session_state:
+        st.session_state.conversation_manager = ConversationManager()
+
     st.sidebar.title("データソース選択")
 
     reference_type = st.sidebar.radio(
         "参照形式を選択してください:",
-        ('ファイル', 'Webサイト'),
+        ('ファイル', 'Webサイト', 'Notion'),
         key='reference_type'
     )
 
@@ -149,6 +156,6 @@ def main():
         st.session_state.input_key += 1
         st.session_state.conversation_count += 1
         st.rerun()
-    
+
 if __name__ == "__main__":
     main()

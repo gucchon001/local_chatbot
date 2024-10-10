@@ -3,6 +3,8 @@ import logging
 from abc import ABC, abstractmethod
 from document_processor import get_file_statistics
 from web_scraper import get_web_statistics
+from notion_client import Client
+from notion_processor import get_notion_pages
 import os
 from datetime import datetime
 import requests
@@ -97,12 +99,46 @@ class WebDataSource(DataSource):
             logger.error(f"最終更新日時の取得に失敗しました: {str(e)}")
         return None
 
+class NotionDataSource(DataSource):
+    def __init__(self, source_config):
+        super().__init__(source_config)
+        self.notion_id = source_config['参照先']
+        self.notion = Client(auth=source_config['notion_token'])
+        logger.info(f"NotionDataSourceが初期化されました: {source_config['名称']} - {self.notion_id}")
+
+    def _fetch_statistics(self):
+        logger.info(f"NotionDataSource: 統計情報を取得します: {self.source_config['名称']} - {self.notion_id}")
+        try:
+            pages = get_notion_pages(self.notion, self.notion_id)
+            stats = {
+                "ページ数": len(pages),
+                "最終更新日": max(page['last_edited_time'] for page in pages) if pages else "N/A"
+            }
+            logger.info(f"統計情報を取得しました: {stats}")
+            return stats
+        except Exception as e:
+            logger.error(f"統計情報の取得中にエラーが発生しました: {str(e)}", exc_info=True)
+            return {"エラー": str(e)}
+
+    def _fetch_last_modified(self, page_id):
+        logger.info(f"NotionDataSource: ページの最終更新日時を取得します: {page_id}")
+        try:
+            page = self.notion.pages.retrieve(page_id)
+            last_modified = datetime.fromisoformat(page['last_edited_time'].replace('Z', '+00:00'))
+            logger.info(f"最終更新日時: {last_modified}")
+            return last_modified
+        except Exception as e:
+            logger.error(f"ページの最終更新日時の取得に失敗しました: {str(e)}")
+            return None
+
 def create_data_source(source_config):
     logger.info(f"create_data_source called with: {source_config}")
     if source_config['参照形式'] == 'ファイル':
         return FileDataSource(source_config)
     elif source_config['参照形式'] == 'Webサイト':
         return WebDataSource(source_config)
+    elif source_config['参照形式'] == 'Notion':
+        return NotionDataSource(source_config)
     else:
         logger.error(f"Unsupported data source type: {source_config['参照形式']}")
         raise ValueError(f"Unsupported data source type: {source_config['参照形式']}")

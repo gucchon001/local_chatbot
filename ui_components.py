@@ -1,8 +1,9 @@
+#ui_components.py
 import streamlit as st
 import os
 from document_processor import get_file_statistics
 from web_scraper import get_web_statistics
-from data_sources import FileDataSource, WebDataSource
+from data_sources import FileDataSource, WebDataSource, NotionDataSource
 from userlog_utils import display_download_button
 
 def set_page_config():
@@ -162,8 +163,20 @@ def display_statistics(data_source):
             display_web_statistics(statistics)
     elif isinstance(data_source, FileDataSource):
         display_file_statistics(statistics)
+    elif isinstance(data_source, NotionDataSource):
+        display_notion_statistics(statistics)
     else:
         st.markdown("統計情報を取得できませんでした。")
+
+def display_notion_statistics(statistics):
+    st.subheader("Notion データベース統計情報")
+    
+    if '警告' in statistics:
+        st.warning(statistics['警告'])
+        return
+
+    st.write(f"ページ数: {statistics.get('ページ数', 'N/A')}")
+    st.write(f"最終更新日: {statistics.get('最終更新日', 'N/A')}")
 
 def display_input_field(key, reference_type, selected_source_name, data_source, conversation_count):
     with st.container():

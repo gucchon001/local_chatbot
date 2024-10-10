@@ -3,12 +3,16 @@ import streamlit as st
 import logging
 from response_processor import process_response
 from database import search_db
+from ai_models import AIModelManager
 
 logger = logging.getLogger(__name__)
 
 def process_user_input(user_input, df, index, embeddings, config, data_source):
     logger.info("process_user_input が呼び出されました")
     st.session_state.messages.append({"role": "user", "content": user_input})
+    
+    if 'ai_manager' not in st.session_state:
+        st.session_state.ai_manager = AIModelManager(config)
     
     try:
         search_results = search_db(user_input, df, index, embeddings)
@@ -20,7 +24,7 @@ def process_user_input(user_input, df, index, embeddings, config, data_source):
     
     with st.spinner('回答を生成中...'):
         try:
-            processed_response = process_response(user_input, search_results, config, st.session_state.custom_role)
+            processed_response = process_response(user_input, search_results, config, st.session_state.custom_role, st.session_state.ai_manager)
             logger.info("回答が正常に生成されました")
         except Exception as e:
             logger.error(f"process_response でエラーが発生しました: {e}")
@@ -48,4 +52,3 @@ def process_user_input(user_input, df, index, embeddings, config, data_source):
     })
 
     logger.info("セッション状態を更新しました")
-    # st.rerun() を削除

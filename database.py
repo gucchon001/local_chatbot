@@ -2,6 +2,7 @@
 import os
 import numpy as np
 import pandas as pd
+import json
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.schema import HumanMessage
 from file_cache import check_file_changes, save_file_hashes, load_file_hashes
@@ -9,6 +10,8 @@ from document_processor import process_document, find_documents
 from vector_store import (create_faiss_index, save_to_parquet, load_from_parquet,
                           save_faiss_index, load_faiss_index)
 from web_scraper import scrape_website
+from notion_processor import process_notion_database, get_notion_pages
+from notion_client import Client
 import logging
 import time
 from datetime import datetime
@@ -90,14 +93,117 @@ class DatabaseManager:
     def load_or_create_db(self, source_config):
         logger.info(f"load_or_create_db called with source_config: {source_config}")
         if source_config['参照形式'] == 'ファイル':
-            logger.info("ファイルデータベースを作成します")
             return self.load_or_create_file_db(source_config)
         elif source_config['参照形式'] == 'Webサイト':
-            logger.info("Webデータベースを作成します")
             return self.load_or_create_web_db(source_config)
+        elif source_config['参照形式'] == 'Notion':
+            return self.load_or_create_notion_db(source_config)
         else:
-            logger.error(f"Unsupported data source type: {source_config['参照形式']}")
             raise ValueError(f"Unsupported data source type: {source_config['参照形式']}")
+    
+    def load_or_create_notion_db(self, source_config):
+        logger.info(f"load_or_create_notion_db が呼び出されました: {source_config['名称']}")
+        try:
+            notion_client = Client(auth=source_config['notion_token'])
+            parquet_file = source_config['parquet_file']
+            faiss_index_file = source_config['faiss_index_file']
+            hash_file = os.path.join(source_config['persist_directory'], 'notion_hashes.json')
+
+            current_hashes = self._get_notion_hashes(notion_client, source_config['参照先'])
+
+            if os.path.exists(parquet_file) and os.path.exists(faiss_index_file) and os.path.exists(hash_file):
+                old_hashes = self._load_notion_hashes(hash_file)
+                if current_hashes == old_hashes:
+                    logger.info("Notionデータベースに変更がありません。既存のデータベースを使用します。")
+                    return self._use_existing_db(parquet_file, faiss_index_file)
+                else:
+                    logger.info("Notionデータベースに変更があります。差分更新を行います。")
+                    return self._update_notion_db(source_config, notion_client, current_hashes, old_hashes, parquet_file, faiss_index_file, hash_file)
+            else:
+                logger.info("新しいNotionデータベースを作成します。")
+                return self._create_new_notion_db(source_config, notion_client, current_hashes, parquet_file, faiss_index_file, hash_file)
+
+        except Exception as e:
+            logger.error(f"Notionデータベースの作成中にエラーが発生しました: {str(e)}", exc_info=True)
+            return None, None, None, None, f"Notionデータベースの作成中にエラーが発生しました: {str(e)}"
+
+    def _get_notion_hashes(self, notion_client, database_id):
+        pages = get_notion_pages(notion_client, database_id)
+        return {page['id']: page['last_edited_time'] for page in pages}
+
+    def _load_notion_hashes(self, hash_file):
+        with open(hash_file, 'r') as f:
+            return json.load(f)
+
+    def _save_notion_hashes(self, hashes, hash_file):
+        with open(hash_file, 'w') as f:
+            json.dump(hashes, f)
+
+    def _update_notion_db(self, source_config, notion_client, current_hashes, old_hashes, parquet_file, faiss_index_file, hash_file):
+        df, index, _, _, _ = self._use_existing_db(parquet_file, faiss_index_file)
+        
+        updated_pages = [page_id for page_id, last_edited in current_hashes.items() 
+                         if page_id not in old_hashes or old_hashes[page_id] != last_edited]
+        
+        new_documents = process_notion_database(notion_client, source_config['参照先'], page_ids=updated_pages)
+        
+        if new_documents:
+            new_content = [doc.page_content for doc in new_documents]
+            new_metadata = [doc.metadata for doc in new_documents]
+            new_vectors = self.generate_embeddings(new_content)
+            
+            new_df = pd.DataFrame({
+                'content': new_content,
+                'metadata': new_metadata,
+                'embedding': new_vectors.tolist()
+            })
+            
+            # 更新されたページを既存のデータフレームから削除
+            df = df[~df['metadata'].apply(lambda x: x['source']).isin(updated_pages)]
+            
+            # 新しいデータを追加
+            df = pd.concat([df, new_df], ignore_index=True)
+            
+            # FAISSインデックスを更新
+            index.add(new_vectors)
+            
+            save_to_parquet(df, parquet_file)
+            save_faiss_index(index, faiss_index_file)
+        
+        self._save_notion_hashes(current_hashes, hash_file)
+        return df, index, None, self.embeddings, "Notionデータベースを更新しました。"
+
+    def _create_new_notion_db(self, source_config, notion_client, current_hashes, parquet_file, faiss_index_file, hash_file):
+        documents = process_notion_database(notion_client, source_config['参照先'])
+        
+        if not documents:
+            logger.warning("Notionデータベースからドキュメントを取得できませんでした。")
+            return None, None, None, None, "Notionデータベースが空です。"
+
+        content_list = [doc.page_content for doc in documents]
+        metadata_list = [doc.metadata for doc in documents]
+
+        vectors = self.generate_embeddings(content_list)
+        
+        if vectors is None or len(vectors) == 0:
+            logger.error("ベクトルの生成に失敗しました")
+            return None, None, None, None, "ベクトルの生成に失敗しました"
+
+        index = create_faiss_index(vectors)
+        
+        df = pd.DataFrame({
+            'content': content_list,
+            'source': [meta['source'] for meta in metadata_list],
+            'page': [meta['title'] for meta in metadata_list],
+            'metadata': metadata_list,
+            'embedding': vectors.tolist()
+        })
+        
+        save_to_parquet(df, parquet_file)
+        save_faiss_index(index, faiss_index_file)
+        self._save_notion_hashes(current_hashes, hash_file)
+
+        return df, index, None, self.embeddings, "新しいNotionデータベースを作成しました。"
 
     def _check_file_timestamps(self, parquet_file, hash_file):
         if os.path.exists(parquet_file) and os.path.exists(hash_file):
@@ -151,16 +257,7 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"既存のデータベース読み込み中にエラー: {str(e)}")
             return None, None, None, None, f"既存のデータベース読み込み中にエラー: {str(e)}"
-    
-    def _process_documents(self, document_files):
-        all_chunks = []
-        for doc_file in document_files:
-            logger.info(f"処理中のファイル: {doc_file}")
-            chunks = process_document(doc_file)
-            all_chunks.extend(chunks)
-        logger.info(f"チャンク化されたドキュメント数: {len(all_chunks)}")
-        return all_chunks
-    
+
     def _update_existing_db(self, source_config, document_files, current_hashes, parquet_file, faiss_index_file, hash_file):
         try:
             df, index, _, _, _ = self._use_existing_db(parquet_file, faiss_index_file)
@@ -183,7 +280,7 @@ class DatabaseManager:
                     df = pd.concat([df, new_df], ignore_index=True)
                     index.add(np.array(new_vectors))
                     
-                    save_to_parquet(df, parquet_file)
+                    save_to_parquet(df, parquet_file, is_web_source=False)
                     save_faiss_index(index, faiss_index_file)
                     save_file_hashes(current_hashes, hash_file)
                     os.utime(hash_file, (os.path.getatime(parquet_file), os.path.getmtime(parquet_file)))
@@ -218,7 +315,7 @@ class DatabaseManager:
                 'page': [str(chunk.metadata.get('page', 'N/A')) for chunk in all_chunks]
             })
 
-            save_to_parquet(df, parquet_file)
+            save_to_parquet(df, parquet_file, is_web_source=False)
 
             logger.info(f"NumPy配列の形状: {all_vectors.shape}")
             
@@ -246,6 +343,22 @@ class DatabaseManager:
 
             logger.info(f"使用される persist_directory_web: {persist_directory_web}")
             
+            parquet_file = source_config['parquet_file']
+            faiss_index_file = source_config['faiss_index_file']
+
+            if os.path.exists(parquet_file) and os.path.exists(faiss_index_file):
+                logger.info("既存のデータベースファイルが見つかりました。読み込みを試みます。")
+                try:
+                    df = load_from_parquet(parquet_file, is_web_source=True)
+                    index = load_faiss_index(faiss_index_file)
+                    role = generate_role_from_db(df, source_config)
+                    embeddings = OpenAIEmbeddings(model=source_config['embeddings_model'])
+                    logger.info("既存のデータベースを正常に読み込みました。")
+                    return df, index, role, embeddings, "既存のWebデータベースを読み込みました。"
+                except Exception as e:
+                    logger.error(f"既存のデータベース読み込み中にエラーが発生しました: {str(e)}")
+                    logger.info("新しいデータベースを作成します。")
+
             df, index, role, embeddings, message = scrape_website(source_config['参照先'], source_config)
 
             if df is None or index is None:
@@ -254,7 +367,11 @@ class DatabaseManager:
             
             logger.info(f"スクレイピングが完了しました。データフレームの行数: {len(df)}, インデックスサイズ: {index.ntotal}")
             
-            return df, index, role, embeddings, message
+            # 新しいデータベースを保存
+            save_to_parquet(df, parquet_file, is_web_source=True)
+            save_faiss_index(index, faiss_index_file)
+            
+            return df, index, role, embeddings, "新しいWebデータベースを作成しました。"
 
         except Exception as e:
             logger.error(f"Webデータベースの作成またはロード中にエラーが発生しました: {str(e)}", exc_info=True)
@@ -307,6 +424,6 @@ def search_db(query, df, index, embeddings, k=5):
     D, I = index.search(query_vector_np, k)
     return [{
         'content': df.iloc[i]['content'],
-        'source': df.iloc[i]['source'],
-        'page': df.iloc[i].get('page', 'N/A')
+        'source': df.iloc[i].get('source') or df.iloc[i]['metadata'].get('source', 'Unknown'),
+        'page': df.iloc[i].get('page') or df.iloc[i]['metadata'].get('title', 'N/A')
     } for i in I[0]]

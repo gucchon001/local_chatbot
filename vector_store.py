@@ -22,8 +22,14 @@ def create_faiss_index(vectors):
         logger.error(f"FAISSインデックスの作成中にエラーが発生しました: {str(e)}", exc_info=True)
         raise
 
-def save_to_parquet(df, file_path):
+def save_to_parquet(df, file_path, is_web_source=False):
     try:
+        # Webソースの場合、last_modified列を処理
+        if is_web_source and 'last_modified' in df.columns:
+            df['last_modified'] = pd.to_datetime(df['last_modified']).dt.strftime('%Y-%m-%dT%H:%M:%S')
+        
+        # ファイルソースの場合、last_modified列が存在しても無視
+        
         table = pa.Table.from_pandas(df)
         pq.write_table(table, file_path)
         logger.info(f"データフレームをParquetファイルとして保存しました: {file_path}")
@@ -31,10 +37,17 @@ def save_to_parquet(df, file_path):
         logger.error(f"Parquetファイルの保存中にエラーが発生しました: {str(e)}", exc_info=True)
         raise
 
-def load_from_parquet(file_path):
+def load_from_parquet(file_path, is_web_source=False):
     try:
         df = pd.read_parquet(file_path)
         df['page'] = df['page'].astype(str)
+        
+        # Webソースの場合、last_modified列を処理
+        if is_web_source and 'last_modified' in df.columns:
+            df['last_modified'] = pd.to_datetime(df['last_modified'], format='%Y-%m-%dT%H:%M:%S')
+        
+        # ファイルソースの場合、last_modified列は無視
+        
         logger.info(f"Parquetファイルからデータフレームを読み込みました: {file_path}")
         return df
     except Exception as e:
